@@ -300,7 +300,6 @@ async function loadVideoMedia(entry) {
   if (!entry.date && entry.blob && entry.blob.lastModified) entry.date = entry.blob.lastModified;
   entry.w = el.videoWidth || 1280; entry.h = el.videoHeight || 720;
   entry.thumb = await grabVideoThumb(el, Math.min(0.5, entry.duration / 2), entry.w, entry.h);
-  if (isBlack(entry.thumb)) entry.thumb = await grabVideoThumb(el, Math.min(1.5, entry.duration / 3), entry.w, entry.h);
 }
 
 async function loadImageMedia(entry) {
@@ -336,7 +335,14 @@ async function loadImageMedia(entry) {
 
 async function loadMedia(entry) {
   entry.url = URL.createObjectURL(entry.blob);
-  if (entry.kind === 'video') await loadVideoMedia(entry); else await loadImageMedia(entry);
+  try {
+    if (entry.kind === 'video') await loadVideoMedia(entry); else await loadImageMedia(entry);
+  } catch (e) {
+    URL.revokeObjectURL(entry.url);
+    unbindMedia(entry.id);
+    if (entry.el && entry.el.parentElement) entry.el.remove();
+    throw e;
+  }
   state.media.set(entry.id, entry);
   return entry;
 }
@@ -400,20 +406,6 @@ async function removeMedia(id) {
   renderAll(); save();
 }
 
-/* Filmstrip thumbnails (8 frames across the source) for the trim control. */
-async function buildStrip(m) {
-  if (m.strip) return m.strip;
-  if (m.kind === 'image') { m.strip = [m.thumb]; return m.strip; }
-  const n = 8, out = [];
-  await withScratch(async () => {
-    await bind(scratch, m);
-    const el = scratch.el;
-    for (let i = 0; i < n; i++) out.push(await grabVideoThumb(el, (i + 0.5) / n * m.duration, m.w, m.h, 120));
-  });
-  m.strip = out;
-  return out;
-}
-
 /* ======================================================================
    Audio graph (preview + export)
    ====================================================================== */
@@ -443,7 +435,7 @@ function unlockMedia() {
     if (g) { g.gain.value = 0; el.muted = false; } else el.muted = true;
     const restore = () => {
       const activeClip = state.playing && activeIdx >= 0 ? P().clips[activeIdx] : null;
-      const keep = (el === musicEl && state.playing && P().music) || (activeClip && activeClip.kind === 'video' && playerForIdx(activeIdx).el === el);
+      const keep = (el === musicEl && state.playing && P().music && !musicPendingForVideo) || (activeClip && activeClip.kind === 'video' && playerForIdx(activeIdx).el === el);
       if (!keep) { el.pause(); if (g) g.gain.value = savedGain; else el.muted = savedMuted; }
       else if (!g) el.muted = savedMuted;
     };
@@ -1306,16 +1298,26 @@ function endLive(err) {
   if (err) le.reject(err); else le.resolve(le.frames);
 }
 const prerolled = new Set();
+const prerolling = new Set();
 function prerollNext(loc) {
   const next = P().clips[loc.idx + 1];
-  if (!next || next.kind !== 'video' || prerolled.has(next.id)) return;
+  if (!next || next.kind !== 'video' || prerolled.has(next.id) || prerolling.has(next.id)) return;
   if (loc.dur - loc.lt > 1.2) return;
   const nm = state.media.get(next.mediaId);
   if (!nm) return;
   const p = playerForIdx(loc.idx + 1);   // the other player: free while the current clip plays
-  prerolled.add(next.id);
+  const token = (p.startToken || 0) + 1;
+  p.startToken = token;
+  prerolling.add(next.id);
   bindSync(p, nm);
-  try { p.el.playbackRate = clamp(speedAt(next, 0) || next.speed, 0.0625, 16); p.el.currentTime = srcTimeAt(next, 0); } catch (e) {}
+  bind(p, nm).then(async () => {
+    if (p.startToken !== token || p.mediaId !== nm.id || P().clips[loc.idx + 1]?.id !== next.id) { prerolling.delete(next.id); return; }
+    try {
+      p.el.playbackRate = clamp(speedAt(next, 0) || next.speed, 0.0625, 16);
+      await seekTo(p.el, srcTimeAt(next, 0));
+      if (p.startToken === token && p.mediaId === nm.id) prerolled.add(next.id);
+    } catch (e) {} finally { prerolling.delete(next.id); }
+  }).catch(() => { prerolling.delete(next.id); });
 }
 
 function effectiveClipVolume(c) {
@@ -1323,22 +1325,64 @@ function effectiveClipVolume(c) {
   const duck = mus && mus.duck ? 0.35 : 1;
   return clamp(c.volume * duck, 0, 1);
 }
+let musicPlaybackStarted = false;
+let musicPendingForVideo = false;
+let waitingForVideo = false;
 function startClipMedia(clip, lt, idx) {
   const m = state.media.get(clip.mediaId);
   if (!m || clip.kind !== 'video') return;
+  if (P().music) {
+    stopMusicNode(); musicEl.pause(); musicPlaybackStarted = false;
+    musicPendingForVideo = true;
+  }
   const p = playerForIdx(idx);
   bindSync(p, m);
   const el = p.el;
-  const st = srcTimeAt(clip, lt), sp = speedAt(clip, lt);
-  if (prerolled.has(clip.id) && Math.abs(el.currentTime - st) < 0.25 && sp > 0) { el.playbackRate = clamp(sp, 0.0625, 16); setElVolume(el, effectiveClipVolume(clip)); el.play().catch(() => {}); return; }
-  el.playbackRate = clamp(sp || clip.speed, 0.0625, 16);
-  try { el.preservesPitch = true; } catch (e) {}
-  setElVolume(el, effectiveClipVolume(clip));
-  el.currentTime = st;
-  if (sp > 0) el.play().catch(() => {}); else el.pause();
+  waitingForVideo = true;
+  const token = (p.startToken || 0) + 1;
+  p.startToken = token;
+  const isCurrent = () => state.playing && activeIdx === idx && P().clips[idx]?.id === clip.id && p.startToken === token && p.mediaId === m.id;
+  (async () => {
+    try {
+      await bind(p, m);
+      if (!isCurrent()) return;
+      if (el.readyState < 1) throw new Error('O navegador não conseguiu carregar este vídeo.');
+      const loc = locate(state.playhead);
+      const currentLt = loc && loc.clip.id === clip.id ? loc.lt : lt;
+      const currentClip = P().clips[idx];
+      const st = srcTimeAt(currentClip, currentLt), sp = speedAt(currentClip, currentLt);
+      el.playbackRate = clamp(sp || currentClip.speed, 0.0625, 16);
+      try { el.preservesPitch = true; } catch (e) {}
+      setElVolume(el, effectiveClipVolume(currentClip));
+      if (!(prerolled.has(clip.id) && Math.abs(el.currentTime - st) < 0.25)) await seekTo(el, st);
+      if (!isCurrent()) return;
+      if (sp > 0) {
+        await el.play();
+        if (!isCurrent()) { el.pause(); return; }
+      } else el.pause();
+      if (waitingForVideo && isCurrent()) {
+        waitingForVideo = false;
+        tStart = state.playhead;
+        wallStart = performance.now();
+      }
+      if (musicPendingForVideo) {
+        musicPendingForVideo = false;
+        startMusic(state.playhead);
+      }
+    } catch (e) {
+      if (!isCurrent()) return;
+      musicPendingForVideo = false;
+      pause();
+      toast(e && e.message ? e.message : 'Não foi possível reproduzir este vídeo. Tente importar o arquivo novamente.', 6000);
+    }
+  })();
 }
 function stopClipMedia(clip, idx) {
-  if (clip.kind === 'video') playerForIdx(idx).el.pause();
+  if (clip.kind === 'video') {
+    const p = playerForIdx(idx);
+    p.startToken = (p.startToken || 0) + 1;
+    p.el.pause();
+  }
 }
 function musicVolumeAt(t) {
   const mus = P().music;
@@ -1364,6 +1408,7 @@ function stopMusicNode() {
 }
 function startMusic(t) {
   const mus = P().music;
+  musicPlaybackStarted = false;
   if (!mus) return;
   stopMusicNode();
   if (actx && masterGain && musicBuffer && musicBufferKey === 'music:' + mus.fileId) {
@@ -1377,6 +1422,7 @@ function startMusic(t) {
     src.connect(musicGain); musicGain.connect(masterGain); if (recDest) musicGain.connect(recDest);
     src.start(0, pos);
     musicNode = src;
+    musicPlaybackStarted = true;
     return;
   }
   musicEl.loop = !!mus.loop;
@@ -1385,7 +1431,7 @@ function startMusic(t) {
   if (pos >= mus.duration) { musicEl.pause(); return; }
   musicEl.currentTime = pos;
   setElVolume(musicEl, musicVolumeAt(t));
-  musicEl.play().catch(() => {});
+  musicEl.play().then(() => { musicPlaybackStarted = true; }).catch(() => {});
 }
 
 function play() {
@@ -1400,9 +1446,11 @@ function play() {
   }
   unlockMedia();
   state.playing = true;
+  musicPlaybackStarted = false;
+  musicPendingForVideo = !!(loc0 && loc0.clip.kind === 'video');
   wallStart = performance.now(); tStart = state.playhead; activeIdx = -1; prerolled.clear();
   if (!state.exporting) showStage(true);
-  startMusic(state.playhead);
+  if (!musicPendingForVideo) startMusic(state.playhead);
   $('#playBtn').textContent = '❚❚';
   cancelAnimationFrame(rafId);
   rafId = requestAnimationFrame(tick);
@@ -1415,6 +1463,9 @@ function pause() {
   activeIdx = -1; prerolled.clear();
   stopMusicNode();
   musicEl.pause();
+  musicPlaybackStarted = false;
+  musicPendingForVideo = false;
+  waitingForVideo = false;
   showStage(false);
   $('#playBtn').textContent = '▶';
   renderAt(state.playhead);
@@ -1423,6 +1474,7 @@ function togglePlay() { state.playing ? pause() : play(); }
 
 function tick() {
   if (!state.playing) return;
+  if (waitingForVideo) { rafId = requestAnimationFrame(tick); return; }
   const total = totalDuration();
   const t = tStart + (performance.now() - wallStart) / 1000;
   if (t >= total) {
@@ -1476,7 +1528,7 @@ function tick() {
   } else { stageUpdate(loc); if (liveExport) liveEncodeFrame(loc, t); }
   if (P().music) {
     if (musicGain) musicGain.gain.value = musicVolumeAt(t);
-    else { setElVolume(musicEl, musicVolumeAt(t)); if (musicEl.paused && musicEl.src && (P().music.loop || P().music.offset + t < P().music.duration)) musicEl.play().catch(() => {}); }
+    else if (musicPlaybackStarted) { setElVolume(musicEl, musicVolumeAt(t)); if (musicEl.paused && musicEl.src && (P().music.loop || P().music.offset + t < P().music.duration)) musicEl.play().catch(() => {}); }
   }
   updatePlayheadUI();
   if (state.exporting) updateExportProgress(t / total);
@@ -1497,7 +1549,13 @@ function addToTimeline(ids, { select = true } = {}) {
   const added = addClipsFromMedia(ids);
   if (select && added.length) state.selectedId = added[added.length - 1].id;
   renderAll(); save();
-  if (phoneLayout.matches && added.length) toast(`${added.length} clip${added.length > 1 ? 's' : ''} added · open the Clip tab to edit`);
+  if (phoneLayout.matches && added.length) {
+    requestAnimationFrame(() => {
+      const node = Array.from($$('.clip')).find(el => el.dataset.id === state.selectedId);
+      if (node) $('#timelineScroll').scrollLeft = Math.max(0, node.offsetLeft - $('#timelineScroll').clientWidth / 2);
+    });
+  }
+  if (phoneLayout.matches && added.length) toast(`${added.length} ${added.length > 1 ? 'clipes adicionados' : 'clipe adicionado'} à linha do tempo`);
 }
 function deleteClip(id) {
   const idx = P().clips.findIndex(c => c.id === id);
@@ -3211,25 +3269,9 @@ function renderMediaGrid() {
    UI – timeline
    ====================================================================== */
 let dragId = null;
-const stripQueue = new Set();
-let stripRunning = false;
-/* Thumbnail for a clip: the filmstrip frame nearest to the clip's start (built lazily in the background). */
-function clipThumb(clip, m) {
-  if (clip.kind !== 'video' || !m.duration) return m.thumb;
-  if (m.strip && m.strip.length > 1) return m.strip[clamp(Math.floor(((clip.start + clip.end) / 2) / m.duration * m.strip.length), 0, m.strip.length - 1)];
-  if (!m.strip && !stripQueue.has(m.id)) { stripQueue.add(m.id); runStripQueue(); }
+/* Keep timeline cards lightweight: each source contributes one small preview image. */
+function clipThumb(_clip, m) {
   return m.thumb;
-}
-async function runStripQueue() {
-  if (stripRunning) return;
-  stripRunning = true;
-  while (stripQueue.size) {
-    const id = stripQueue.values().next().value; stripQueue.delete(id);
-    const m = state.media.get(id);
-    if (!m || m.strip) continue;
-    try { await buildStrip(m); if (!state.playing) renderTimeline(); } catch (e) {}
-  }
-  stripRunning = false;
 }
 function renderTimeline() {
   const z = state.tlZoom;
@@ -3323,6 +3365,17 @@ function renderTimeline() {
   const emptyProject = P().clips.length === 0;
   $('#emptyHint').hidden = !emptyProject;
   $('#app').classList.toggle('empty-project', emptyProject);
+  updateTimelineControls();
+}
+function updateTimelineControls() {
+  const zoom = $('#tlZoom');
+  if (zoom && Number(zoom.value) !== state.tlZoom) zoom.value = state.tlZoom;
+  const remove = $('#timelineDeleteBtn');
+  if (remove) remove.disabled = !selectedClip();
+}
+function setTimelineZoom(value) {
+  state.tlZoom = clamp(Number(value) || 60, 20, 200);
+  renderTimeline();
 }
 function updatePlayheadUI() {
   const z = state.tlZoom;
@@ -3336,12 +3389,14 @@ function updatePlayheadUI() {
     const loc = locate(state.playhead);
     if (loc && loc.clip.id !== state.selectedId) { state.selectedId = loc.clip.id; $$('.clip').forEach(el => el.classList.toggle('selected', el.dataset.id === state.selectedId)); renderInspector(); }
   }
+  updateTimelineControls();
 }
 function selectClip(id) {
-  if (state.selectedId === id) return;
+  if (state.selectedId === id) { updateTimelineControls(); return; }
   state.selectedId = id;
   $$('.clip').forEach(el => el.classList.toggle('selected', el.dataset.id === id));
   renderInspector();
+  updateTimelineControls();
 }
 
 /* Scrub on ruler / empty timeline area */
@@ -3409,10 +3464,7 @@ function renderInspector() {
     $('#trimStart').value = Math.round(c.start / m.duration * 1000);
     $('#trimEnd').value = Math.round(c.end / m.duration * 1000);
     updateTrimLabels(c, m);
-    buildStrip(m).then(strip => {
-      if (selectedClip() !== c) return;
-      $('#filmstrip').innerHTML = strip.map(s => `<img src="${s}" alt="">`).join('');
-    });
+    $('#filmstrip').innerHTML = m.thumb ? `<img src="${m.thumb}" alt="Prévia do vídeo">` : '';
   } else {
     $('#imageDuration').value = c.imageDuration;
     $('#imageDurationLabel').textContent = `${c.imageDuration.toFixed(1)}s`;
@@ -3577,17 +3629,18 @@ function bindUI() {
     state.activeTab = t.dataset.tab;
   }));
 
-  // Phone layout: the media bin lives in a "Media" tab instead of a side panel.
+  // Keep the media bin available on desktop; phones import directly from the header.
   const mediaPanel = $('.media-panel'), workspace = $('.workspace'), mediaPage = $('.media-page');
   const placeMediaPanel = () => {
     if (phoneLayout.matches) { if (mediaPanel.parentElement !== mediaPage) mediaPage.appendChild(mediaPanel); }
     else if (mediaPanel.parentElement !== workspace) workspace.insertBefore(mediaPanel, workspace.firstChild);
     if (!phoneLayout.matches && state.activeTab === 'media') $('.tab[data-tab="clip"]').click();
+    if (phoneLayout.matches && state.activeTab === 'media') $('.tab[data-tab="clip"]').click();
     renderTimeline();
   };
   placeMediaPanel();
   (phoneLayout.addEventListener ? phoneLayout.addEventListener('change', placeMediaPanel) : phoneLayout.addListener(placeMediaPanel));
-  if (phoneLayout.matches && !state.media.size) $('.tab[data-tab="media"]').click();
+  if (phoneLayout.matches) $('.tab[data-tab="clip"]').click();
 
   // Top bar
   const onTitle = (e) => { P().title = e.target.value; $('#projectTitle').value = $('#projectTitleMobile').value = P().title; save(); };
@@ -3597,6 +3650,7 @@ function bindUI() {
   $('#undoBtn').addEventListener('click', undo);
   $('#redoBtn').addEventListener('click', redo);
   $('#exportBtn').addEventListener('click', openExport);
+  $('#quickImportBtn').addEventListener('click', () => { if (state.playing) pause(); $('#fileInput').click(); });
   const newProjectHandler = async () => {
     if (!confirm('Começar outro vídeo? Os arquivos importados e a edição atual serão removidos deste navegador.')) return;
     pause();
@@ -3617,12 +3671,13 @@ function bindUI() {
   $('#dropZone').addEventListener('click', () => $('#fileInput').click());
   $('#startImportBtn').addEventListener('click', () => $('#fileInput').click());
   $('#fileInput').addEventListener('change', async (e) => {
+    if (state.playing) pause();
     const wasEmpty = P().clips.length === 0;
     const added = await importFiles(e.target.files);
-    if (wasEmpty && added.length) {
+    if (added.length && (wasEmpty || phoneLayout.matches)) {
       addToTimeline(added.map(m => m.id));
       $('.tab[data-tab="clip"]').click();
-      toast('Pronto! Toque no clipe para começar a editar.');
+      if (wasEmpty) toast('Pronto! Toque no clipe para começar a editar.');
     }
     e.target.value = '';
   });
@@ -3717,6 +3772,7 @@ function bindUI() {
   $('#moveRightBtn').addEventListener('click', () => { if (state.selectedId) nudgeClip(state.selectedId, 1); });
   $('#dupClipBtn').addEventListener('click', () => { if (state.selectedId) duplicateClip(state.selectedId); });
   $('#deleteClipBtn').addEventListener('click', () => { if (state.selectedId) deleteClip(state.selectedId); });
+  $('#timelineDeleteBtn').addEventListener('click', () => { if (state.selectedId) deleteClip(state.selectedId); });
 
   // Style tab
   bindRange('#brightness', (v, c) => { c.filter.brightness = v; $('#brightnessLabel').textContent = v.toFixed(2); });
@@ -3816,7 +3872,9 @@ function bindUI() {
   $('#fxThemeBtn').addEventListener('click', () => { const th = THEMES[P().theme] || THEMES.classic; fxSet({ ...FX_DEFAULT, ...(th.fx || {}) }); toast(`${th.name} look restored`); });
 
   // Timeline zoom
-  $('#tlZoom').addEventListener('input', (e) => { state.tlZoom = Number(e.target.value); renderTimeline(); });
+  $('#tlZoom').addEventListener('input', (e) => setTimelineZoom(e.target.value));
+  $('#tlZoomOut').addEventListener('click', () => setTimelineZoom(state.tlZoom - 15));
+  $('#tlZoomIn').addEventListener('click', () => setTimelineZoom(state.tlZoom + 15));
 
   // Export dialog
   $('#exportCancelBtn').addEventListener('click', closeExport);

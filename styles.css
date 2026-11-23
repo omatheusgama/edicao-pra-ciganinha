@@ -185,7 +185,11 @@ button:disabled { opacity: 0.5; cursor: default; filter: none; }
 /* ---------- Timeline ---------- */
 .timeline-panel { background: var(--panel); border-top: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
 .timeline-head { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.timeline-tools { display: flex; align-items: center; gap: 5px; }
 .timeline-head input[type=range] { width: 100px; vertical-align: middle; }
+.zoom-step { width: 30px; height: 30px; font-size: 18px; }
+.timeline-delete { color: var(--danger); width: 34px; height: 30px; margin-left: 3px; }
+.quick-import-btn { display: none; white-space: nowrap; }
 .timeline-scroll { flex: 1; overflow-x: auto; overflow-y: hidden; position: relative; }
 .timeline { position: relative; min-width: 100%; height: 100%; padding: 0 12px; }
 .ruler { position: relative; height: 22px; border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; touch-action: none; }
@@ -227,16 +231,17 @@ button:disabled { opacity: 0.5; cursor: default; filter: none; }
 @media (max-width: 1000px) {
   .workspace { grid-template-columns: 200px 1fr 260px; }
 }
-/* Phones: preview on top, timeline, then a tabbed panel (Media / Clip / Style / Text / Music / Theme). */
+/* Phones: keep the preview and timeline clear, with only the four common editing tabs. */
 @media (max-width: 760px), (pointer: coarse) and (max-height: 500px) {
-  #app { grid-template-rows: 56px auto 118px 1fr; padding-top: calc(env(safe-area-inset-top) + 10px); }
+  #app { grid-template-rows: 56px auto 140px 1fr; padding-top: calc(env(safe-area-inset-top) + 10px); }
   #app.empty-project { grid-template-rows: 56px minmax(0, 1fr); }
   .topbar { padding: 0 12px; gap: 8px; }
   .logo-mark { width: 34px; height: 34px; }
   .topbar .sub, .title-input, #newProjectBtn, .logo-text, #undoBtn, #redoBtn { display: none; }
   #app.empty-project .logo-text { display: inline; }
   .topbar-actions { gap: 6px; }
-  .topbar select { width: 86px; padding: 6px 4px; font-size: 12px; }
+  .topbar select { width: 76px; padding: 6px 4px; font-size: 12px; }
+  .quick-import-btn { display: inline-flex; align-items: center; padding: 6px 8px; font-size: 12px; }
   #exportBtn { white-space: nowrap; padding: 7px 10px; }
   .workspace { display: contents; }
   .media-panel { display: none; }
@@ -254,13 +259,19 @@ button:disabled { opacity: 0.5; cursor: default; filter: none; }
   .inspector, .timeline-panel { min-width: 0; }
   .preview-wrap { padding: 8px; }
   #preview { max-height: calc(42vh - 70px); max-height: calc(42dvh - 70px); }
-  .transport { padding: 6px 8px; gap: 6px; flex-wrap: wrap; }
-  .transport .time { font-size: 12px; margin-left: 0; }
+  .transport { padding: 6px 8px; gap: 8px; flex-wrap: nowrap; }
+  .transport #toStartBtn, .transport #toEndBtn, .transport #splitBtn,
+  .transport #frameGrabBtn, .transport #fullscreenBtn, .transport .spacer { display: none; }
+  .transport .time { font-size: 12px; margin-left: 4px; }
   .empty-hint .big { font-size: 22px; line-height: 1.15; padding: 0 8px; }
   .empty-hint p { font-size: 12px; padding: 0 20px; margin: 8px 0 16px; }
   .timeline-panel { order: 2; grid-row: 3; }
   .timeline-head span.small-text { display: none; }
-  .timeline-head { padding: 2px 10px; }
+  .timeline-head { padding: 4px 8px; justify-content: flex-end; }
+  .timeline-tools { gap: 4px; }
+  .timeline-head input[type=range] { width: min(24vw, 88px); }
+  .zoom-step { width: 30px; height: 30px; }
+  .timeline-delete { width: 34px; height: 30px; }
   .clips { height: 62px; padding: 6px 0 2px; }
   .clip .label { font-size: 9px; }
   .music-track { height: 16px; }
@@ -268,10 +279,17 @@ button:disabled { opacity: 0.5; cursor: default; filter: none; }
   .inspector { order: 3; grid-row: 4; border-left: 0; border-top: 1px solid var(--border); min-height: 0; padding-bottom: env(safe-area-inset-bottom); }
   .tabs { overflow-x: auto; }
   .tab { padding: 10px 6px; font-size: 13px; min-width: 56px; }
-  .tab[data-tab="fx"], .tab[data-tab="stickers"] { display: none; }
+  .tab[data-tab="media"], .tab[data-tab="fx"], .tab[data-tab="stickers"], .tab[data-tab="theme"] { display: none; }
   .tab-page { padding: 10px 12px; }
   .filter-grid { grid-template-columns: repeat(4, 1fr); }
   .toast { bottom: auto; top: 60px; }
   .modal-card { width: 94vw; }
   input[type=range] { height: 28px; }
+}
+@media (max-width: 360px) {
+  .topbar { padding-left: 8px; padding-right: 8px; gap: 6px; }
+  .topbar-actions { gap: 4px; }
+  .topbar select { width: 70px; }
+  .quick-import-btn { width: 34px; justify-content: center; padding: 6px 4px; font-size: 0; }
+  .quick-import-btn::before { content: '＋'; font-size: 19px; }
 }

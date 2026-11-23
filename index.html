@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-title" content="Ciganinha">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="styles.css?v=20261123">
+<link rel="stylesheet" href="styles.css?v=20261123b">
 </head>
 <body>
 <div id="app" class="empty-project">
@@ -22,6 +22,7 @@
     <div class="brand"><img class="logo-mark" src="icons/icon.svg" alt="" title="Edição pra Ciganinha"><span class="logo-text">Edição pra Ciganinha</span></div>
     <input id="projectTitle" class="title-input" placeholder="Untitled project" maxlength="60">
     <div class="topbar-actions">
+      <button id="quickImportBtn" class="small-btn quick-import-btn" aria-label="Adicionar vídeos e fotos">＋ Adicionar</button>
       <select id="aspectSelect" title="Aspect ratio">
         <option value="16:9">16:9 Landscape</option>
         <option value="9:16" selected>9:16 Vertical</option>
@@ -500,7 +501,12 @@
     <div class="timeline-head">
       <span class="small-text muted">Timeline · drag clips to reorder · tap to select · S split · Del delete</span>
       <div class="spacer"></div>
-      <label class="small-text">Zoom <input type="range" id="tlZoom" min="20" max="200" value="60"></label>
+      <div class="timeline-tools">
+        <button id="tlZoomOut" class="icon-btn zoom-step" title="Diminuir zoom da linha do tempo" aria-label="Diminuir zoom">−</button>
+        <input type="range" id="tlZoom" min="20" max="200" value="60" title="Zoom da linha do tempo" aria-label="Zoom da linha do tempo">
+        <button id="tlZoomIn" class="icon-btn zoom-step" title="Aumentar zoom da linha do tempo" aria-label="Aumentar zoom">＋</button>
+        <button id="timelineDeleteBtn" class="icon-btn timeline-delete" title="Excluir clipe selecionado" aria-label="Excluir clipe selecionado" disabled>🗑</button>
+      </div>
     </div>
     <div class="timeline-scroll" id="timelineScroll">
       <div class="timeline" id="timeline">
@@ -555,7 +561,7 @@
 <script src="js/db.js"></script>
 <script src="js/beats.js"></script>
 <script src="js/presets.js"></script>
-<script src="js/app.js?v=20261123"></script>
+<script src="js/app.js?v=20261123b"></script>
 <script src="js/pt-br.js"></script>
 <script>if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});</script>
 </body>
